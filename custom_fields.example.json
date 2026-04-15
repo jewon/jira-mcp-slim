@@ -1,0 +1,75 @@
+{
+  "개발요청": {
+    "related_layer": {
+      "field_id": "customfield_11301",
+      "label": "관련 레이어",
+      "type": "text",
+      "required": true,
+      "description": "관련된 레이어 또는 테이블명"
+    },
+    "purpose": {
+      "field_id": "customfield_11302",
+      "label": "목적 및 기대 결과",
+      "type": "text",
+      "required": true,
+      "description": "개발 목적과 기대 결과 설명"
+    },
+    "tool_name": {
+      "field_id": "customfield_11400",
+      "label": "툴 명칭",
+      "type": "text",
+      "required": true,
+      "description": "관련 툴 또는 도구 이름"
+    },
+    "due_date": {
+      "field_id": "customfield_10437",
+      "label": "완료 요청일",
+      "type": "date",
+      "required": true,
+      "description": "완료 요청일. 형식: YYYY-MM-DD"
+    }
+  },
+  "작업": {
+    "work_purpose": {
+      "field_id": "customfield_11313",
+      "label": "작업 목적",
+      "type": "text",
+      "required": true,
+      "description": "작업의 목적 설명"
+    },
+    "target_table": {
+      "field_id": "customfield_11314",
+      "label": "목적 테이블",
+      "type": "text",
+      "required": true,
+      "description": "작업 대상 테이블명"
+    },
+    "output_fields": {
+      "field_id": "customfield_11315",
+      "label": "출력 필드",
+      "type": "text",
+      "required": true,
+      "description": "출력 필드 목록"
+    },
+    "output_conditions": {
+      "field_id": "customfield_11316",
+      "label": "출력 조건",
+      "type": "text",
+      "required": true,
+      "description": "출력 조건 설명"
+    },
+    "due_date": {
+      "field_id": "customfield_10437",
+      "label": "완료 요청일",
+      "type": "date",
+      "required": true,
+      "description": "완료 요청일. 형식: YYYY-MM-DD"
+    },
+    "validation_target_date": {
+      "field_id": "customfield_10407",
+      "label": "유효성 검증목표일",
+      "type": "date",
+      "description": "유효성 검증 목표일. 형식: YYYY-MM-DD"
+    }
+  }
+}

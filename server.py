@@ -1,5 +1,6 @@
 """Jira Board MCP Server — Jira Server 7.13.5 REST API 기반."""
 
+import json
 import os
 from pathlib import Path
 
@@ -26,15 +27,22 @@ AGILE = f"{JIRA_URL}/rest/agile/1.0"
 
 TIMEOUT = 15
 
+# 커스텀 필드 설정 (custom_fields.json)
+# 구조: { "<이슈유형>": { "<key>": { "field_id", "label", "type", "required", "description", "allowed_values"? } } }
+_CF_PATH = Path(__file__).parent / "custom_fields.json"
+CUSTOM_FIELDS: dict[str, dict[str, dict]] = json.loads(_CF_PATH.read_text(encoding="utf-8")) if _CF_PATH.exists() else {}
+
 _mode = "읽기/쓰기" if WRITE_ENABLED else "읽기 전용"
 mcp = FastMCP(
     "Jira Board MCP",
     instructions=(
         f"Jira Server 보드의 이슈를 조회하고 관리하는 MCP 서버입니다. (현재 모드: {_mode}) "
-        "이슈 검색, 상세 조회 등을 지원합니다. "
+        "이슈 검색, 상세 조회, 이슈 생성, 댓글 작성 등을 지원합니다. "
         "이슈 내용을 기반으로 내부 데이터를 조회하려면 별도의 내부 데이터 MCP를 함께 사용하세요."
     ),
 )
+
+LLM_PREFIX = "(이 이슈/댓글은 LLM이 작성하여 MCP(JIRA MCP)를 통해 자동 등록되었습니다.)"
 
 
 # ── 헬퍼 ────────────────────────────────────────
@@ -46,9 +54,31 @@ def _get(url: str, params: dict | None = None) -> dict:
     return resp.json()
 
 
+def _put(url: str, json: dict | None = None) -> requests.Response:
+    resp = requests.put(url, auth=auth, json=json, timeout=TIMEOUT)
+    if not resp.ok:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        raise requests.HTTPError(
+            f"Jira API error {resp.status_code}: {body}",
+            response=resp,
+        )
+    return resp
+
+
 def _post(url: str, json: dict | None = None) -> requests.Response:
     resp = requests.post(url, auth=auth, json=json, timeout=TIMEOUT)
-    resp.raise_for_status()
+    if not resp.ok:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        raise requests.HTTPError(
+            f"Jira API error {resp.status_code}: {body}",
+            response=resp,
+        )
     return resp
 
 
@@ -178,6 +208,45 @@ def get_board_sprints(state: str = "active") -> list[dict]:
     ]
 
 
+@mcp.tool()
+def list_custom_fields(issuetype: str | None = None) -> dict:
+    """이슈 유형별 커스텀 필드 목록을 반환합니다.
+
+    issuetype을 지정하면 해당 유형의 필드만 반환하고,
+    생략하면 전체 이슈 유형 목록과 각 유형의 필드 요약을 반환합니다.
+
+    create_issue 호출 전에 이 툴로 필수 필드를 먼저 확인하세요.
+    """
+    if issuetype:
+        cfg = CUSTOM_FIELDS.get(issuetype)
+        if not cfg:
+            return {"error": f"'{issuetype}' 이슈 유형을 찾을 수 없습니다.", "available": list(CUSTOM_FIELDS.keys())}
+        return {
+            "issuetype": issuetype,
+            "fields": [
+                {
+                    "key": key,
+                    "label": f.get("label", key),
+                    "type": f.get("type", "text"),
+                    "required": f.get("required", False),
+                    "description": f.get("description", ""),
+                    "allowed_values": f.get("allowed_values"),
+                }
+                for key, f in cfg.items()
+            ],
+        }
+    return {
+        "issuetypes": [
+            {
+                "name": it,
+                "required_fields": [k for k, f in fields.items() if f.get("required")],
+                "optional_fields": [k for k, f in fields.items() if not f.get("required")],
+            }
+            for it, fields in CUSTOM_FIELDS.items()
+        ]
+    }
+
+
 # ── 쓰기 Tools (JIRA_WRITE_ENABLED=true 일 때만 노출) ──
 
 
@@ -199,17 +268,115 @@ if WRITE_ENABLED:
             available = [t["name"] for t in transitions]
             return f"'{transition_name}' 전환을 찾을 수 없습니다. 가능한 전환: {available}"
 
-        _post(
-            f"{API2}/issue/{issue_key}/transitions",
-            {"transition": {"id": match["id"]}},
-        )
-        return f"{issue_key} → {match['name']} 완료"
+        try:
+            _post(
+                f"{API2}/issue/{issue_key}/transitions",
+                {"transition": {"id": match["id"]}},
+            )
+            return f"{issue_key} → {match['name']} 완료"
+        except requests.HTTPError as e:
+            return f"전환 실패: {e}"
+
+    @mcp.tool()
+    def create_issue(
+        project_key: str,
+        summary: str,
+        description: str = "",
+        issuetype: str = "작업",
+        priority: str | None = None,
+        assignee: str | None = None,
+        labels: list[str] | None = None,
+        custom_fields: dict[str, object] | None = None,
+    ) -> dict:
+        """새 이슈를 생성합니다.
+
+        project_key: 프로젝트 키 (예: TA2018MPSMDS)
+        summary: 이슈 제목
+        description: 이슈 본문 (LLM prefix가 자동으로 앞에 붙습니다)
+        issuetype: 이슈 유형. list_custom_fields()로 지원 유형 확인 가능
+        priority: 우선순위 (Highest, High, Medium, Low, Lowest)
+        assignee: 담당자 username
+        labels: 레이블 목록
+        custom_fields: 커스텀 필드 값 딕셔너리.
+            이슈 유형마다 필수 필드가 다르므로 list_custom_fields(issuetype=...) 로 먼저 확인하세요.
+            예: {"due_date": "2026-05-01", "related_layer": "user_table"}
+        """
+        issuetype_cfg = CUSTOM_FIELDS.get(issuetype, {})
+        custom_fields = custom_fields or {}
+
+        # 필수 필드 누락 검사
+        missing = [
+            f"{key} ({cfg['label']})"
+            for key, cfg in issuetype_cfg.items()
+            if cfg.get("required") and key not in custom_fields
+        ]
+        if missing:
+            return {"error": f"'{issuetype}' 이슈 유형에 필수 필드가 누락되었습니다: {missing}"}
+
+        prefixed_description = f"{LLM_PREFIX}\n\n{description}" if description else LLM_PREFIX
+
+        fields: dict = {
+            "project": {"key": project_key},
+            "summary": summary,
+            "description": prefixed_description,
+            "issuetype": {"name": issuetype},
+        }
+        if priority:
+            fields["priority"] = {"name": priority}
+        if assignee:
+            fields["assignee"] = {"name": assignee}
+        if labels:
+            fields["labels"] = labels
+
+        for key, value in custom_fields.items():
+            cfg = issuetype_cfg.get(key)
+            if not cfg:
+                return {"error": f"'{issuetype}' 이슈 유형에 없는 필드: '{key}'. list_custom_fields(issuetype='{issuetype}')로 확인하세요."}
+            allowed = cfg.get("allowed_values")
+            if allowed and value not in allowed:
+                return {"error": f"'{key}' 필드의 허용값: {allowed}. 입력값: '{value}'"}
+            fields[cfg["field_id"]] = value
+
+        try:
+            resp = _post(f"{API2}/issue", {"fields": fields})
+            data = resp.json()
+            return {
+                "key": data.get("key"),
+                "id": data.get("id"),
+                "self": data.get("self"),
+            }
+        except requests.HTTPError as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    def update_issue_description(issue_key: str, description: str) -> str:
+        """이슈의 본문(description)을 수정합니다.
+
+        issue_key: 수정할 이슈 키 (예: TA2018MPSMDS-123)
+        description: 새 본문 내용 (LLM prefix가 자동으로 앞에 붙습니다)
+        """
+        prefixed_description = f"{LLM_PREFIX}\n\n{description}"
+        try:
+            _put(
+                f"{API2}/issue/{issue_key}",
+                {"fields": {"description": prefixed_description}},
+            )
+            return f"{issue_key} 본문 수정 완료"
+        except requests.HTTPError as e:
+            return f"본문 수정 실패: {e}"
 
     @mcp.tool()
     def add_comment(issue_key: str, body: str) -> str:
-        """이슈에 코멘트를 추가합니다. body에 해결 가이드나 분석 결과를 작성하세요."""
-        _post(f"{API2}/issue/{issue_key}/comment", {"body": body})
-        return f"{issue_key}에 코멘트 추가 완료"
+        """이슈에 코멘트를 추가합니다. body에 해결 가이드나 분석 결과를 작성하세요.
+
+        코멘트 본문 앞에 LLM prefix가 자동으로 붙습니다.
+        """
+        prefixed_body = f"{LLM_PREFIX}\n\n{body}"
+        try:
+            _post(f"{API2}/issue/{issue_key}/comment", {"body": prefixed_body})
+            return f"{issue_key}에 코멘트 추가 완료"
+        except requests.HTTPError as e:
+            return f"코멘트 추가 실패: {e}"
 
 
 # ── Resources ───────────────────────────────────
