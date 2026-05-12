@@ -111,7 +111,8 @@ mcp dev server.py
 | Tool | 설명 |
 |---|---|
 | `search_issues` | JQL로 이슈 검색 |
-| `get_issue` | 이슈 상세 조회 (설명, 댓글, 가능한 전환) |
+| `get_issue` | 이슈 상세 조회 (설명, 댓글, 첨부파일 목록, 가능한 전환) |
+| `download_attachment` | 이슈 첨부파일을 로컬 `downloads/<issue_key>/` 폴더로 다운로드 |
 | `get_sprint_issues` | 스프린트 이슈 목록 (기본: 활성 스프린트) |
 | `get_board_sprints` | 보드 스프린트 목록 |
 | `list_custom_fields` | 이슈 유형별 커스텀 필드 목록 조회 |
@@ -134,6 +135,21 @@ mcp dev server.py
 ```
 
 > `create_issue` 및 `add_comment`, `update_issue_description`으로 작성된 내용에는 LLM이 자동 생성했음을 나타내는 prefix가 앞에 붙습니다.
+
+### 첨부파일 다운로드
+
+`get_issue`는 이슈의 첨부파일 목록을 `attachments` 필드로 함께 반환합니다. 각 항목에는 `id`, `filename`, `mimeType`, `size`, `author`, `created`, `content`, `thumbnail`이 포함됩니다.
+
+`download_attachment`는 `attachment_id` 또는 `filename`으로 첨부파일을 선택해 다운로드합니다. 저장 위치는 항상 서버 디렉터리 내부의 `downloads/<issue_key>/`로 고정되며, 호출자가 임의 경로를 지정할 수 없습니다. 같은 파일명이 이미 있으면 최신 다운로드 파일로 덮어씁니다.
+
+예:
+
+```python
+download_attachment(
+    issue_key="TA2018MPSMDS-3880",
+    attachment_id="90587",
+)
+```
 
 ## 제공하는 Resources
 

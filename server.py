@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 import requests
@@ -26,6 +27,7 @@ API2 = f"{JIRA_URL}/rest/api/2"
 AGILE = f"{JIRA_URL}/rest/agile/1.0"
 
 TIMEOUT = 15
+DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 
 # 커스텀 필드 설정 (custom_fields.json)
 # 구조: { "<이슈유형>": { "<key>": { "field_id", "label", "type", "required", "description", "allowed_values"? } } }
@@ -82,6 +84,45 @@ def _post(url: str, json: dict | None = None) -> requests.Response:
     return resp
 
 
+def _attachment_summary(attachment: dict) -> dict:
+    return {
+        "id": attachment.get("id"),
+        "filename": attachment.get("filename"),
+        "mimeType": attachment.get("mimeType"),
+        "size": attachment.get("size"),
+        "author": (attachment.get("author") or {}).get("displayName"),
+        "created": attachment.get("created"),
+        "content": attachment.get("content"),
+        "thumbnail": attachment.get("thumbnail"),
+    }
+
+
+def _safe_filename(filename: str) -> str:
+    name = Path(filename).name
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip()
+    return name or "attachment"
+
+
+def _download_attachment_content(url: str, path: Path) -> requests.Response:
+    with requests.get(url, auth=auth, stream=True, timeout=TIMEOUT) as resp:
+        if not resp.ok:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            raise requests.HTTPError(
+                f"Jira API error {resp.status_code}: {body}",
+                response=resp,
+            )
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        return resp
+
+
 def _active_sprint_id() -> int | None:
     sprints = _get(
         f"{AGILE}/board/{BOARD_ID}/sprint", {"state": "active"}
@@ -131,11 +172,12 @@ def get_issue(issue_key: str) -> dict:
     """
     data = _get(f"{API2}/issue/{issue_key}", {
         "fields": "summary,description,status,assignee,reporter,"
-                  "priority,comment,created,updated,issuetype,labels,components",
+                  "priority,comment,attachment,created,updated,issuetype,labels,components",
         "expand": "transitions",
     })
     fields = data.get("fields", {})
     comments = fields.get("comment", {}).get("comments", [])
+    attachments = fields.get("attachment", [])
     transitions = data.get("transitions", [])
 
     return {
@@ -151,6 +193,7 @@ def get_issue(issue_key: str) -> dict:
         "components": [c["name"] for c in fields.get("components", [])],
         "created": fields.get("created"),
         "updated": fields.get("updated"),
+        "attachments": [_attachment_summary(a) for a in attachments],
         "comments": [
             {
                 "author": c.get("author", {}).get("displayName"),
@@ -162,6 +205,69 @@ def get_issue(issue_key: str) -> dict:
         "available_transitions": [
             {"id": t["id"], "name": t["name"]} for t in transitions
         ],
+    }
+
+
+@mcp.tool()
+def download_attachment(
+    issue_key: str,
+    attachment_id: str | None = None,
+    filename: str | None = None,
+) -> dict:
+    """Download one Jira issue attachment to a local file.
+
+    Specify either attachment_id or filename. If the issue has exactly one
+    attachment, both can be omitted. By default files are saved under
+    downloads/<issue_key>/.
+    """
+    data = _get(f"{API2}/issue/{issue_key}", {"fields": "attachment"})
+    attachments = data.get("fields", {}).get("attachment", [])
+
+    if not attachments:
+        return {"error": f"{issue_key} has no attachments."}
+
+    matches = attachments
+    if attachment_id:
+        matches = [a for a in attachments if str(a.get("id")) == str(attachment_id)]
+    if filename:
+        matches = [a for a in matches if a.get("filename") == filename]
+
+    if not attachment_id and not filename and len(matches) > 1:
+        return {
+            "error": "Multiple attachments found. Specify attachment_id or filename.",
+            "attachments": [_attachment_summary(a) for a in attachments],
+        }
+    if not matches:
+        return {
+            "error": "Attachment not found.",
+            "attachments": [_attachment_summary(a) for a in attachments],
+        }
+    if len(matches) > 1:
+        return {
+            "error": "Multiple attachments matched. Specify attachment_id.",
+            "attachments": [_attachment_summary(a) for a in matches],
+        }
+
+    attachment = matches[0]
+    content_url = attachment.get("content")
+    if not content_url:
+        return {"error": "Attachment has no content URL.", "attachment": _attachment_summary(attachment)}
+
+    base_dir = (DOWNLOAD_DIR / issue_key).resolve()
+    path = base_dir / _safe_filename(attachment.get("filename") or f"attachment-{attachment.get('id')}")
+
+    try:
+        _download_attachment_content(content_url, path)
+    except requests.HTTPError as e:
+        return {"error": str(e), "attachment": _attachment_summary(attachment)}
+
+    size = path.stat().st_size
+    return {
+        "issue_key": issue_key,
+        "attachment": _attachment_summary(attachment),
+        "path": str(path),
+        "downloaded_size": size,
+        "size_matches": attachment.get("size") in (None, size),
     }
 
 
